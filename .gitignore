@@ -1,0 +1,64 @@
+# Entorno virtual
+.venv/
+venv/
+env/
+
+# Bytecode y caché de Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.pyo
+*.pyd
+
+# Distribución / build
+build/
+dist/
+*.egg-info/
+*.egg
+
+# Audios y videos (datos de prueba)
+*.mp3
+*.wav
+*.m4a
+*.aac
+*.ogg
+*.flac
+*.opus
+*.wma
+*.mp4
+*.mkv
+*.mov
+*.webm
+*.avi
+
+# Transcripciones generadas
+*.srt
+*.vtt
+*.json
+# Mantén el txt de ejemplo si lo necesitas; descomenta para ignorar:
+# *.txt
+
+# Modelos descargados (por si alguien copia el caché aquí)
+models/
+*.pt
+*.bin
+
+# Configuración local de IDE / editores
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Configuración local de Claude Code
+.claude/
+
+# Sistema operativo
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+$RECYCLE.BIN/
+.DS_Store
+
+# Logs
+*.log

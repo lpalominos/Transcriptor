@@ -1,12 +1,46 @@
+import contextlib
 import json
 from pathlib import Path
+from threading import Event
 from typing import Callable, Optional
 
+import tqdm as tqdm_module
 import whisper
 
 
 FORMATOS = ("txt", "srt", "vtt", "json")
 MODELOS = ("tiny", "base", "small", "medium", "large", "turbo")
+
+
+class TranscripcionCancelada(Exception):
+    pass
+
+
+@contextlib.contextmanager
+def _tqdm_redirect(on_progress=None, evento_cancelar=None):
+    """Reemplaza tqdm temporalmente para capturar progreso y soportar cancelación."""
+    original = tqdm_module.tqdm
+
+    class TqdmProxy(original):
+        def __init__(self, *args, **kwargs):
+            kwargs.setdefault("disable", False)
+            super().__init__(*args, **kwargs)
+
+        def update(self, n=1):
+            if evento_cancelar and evento_cancelar.is_set():
+                raise TranscripcionCancelada()
+            super().update(n)
+            if on_progress and self.total:
+                on_progress(self.n / self.total)
+
+        def display(self, *args, **kwargs):
+            pass  # suprimir salida a stderr
+
+    tqdm_module.tqdm = TqdmProxy
+    try:
+        yield
+    finally:
+        tqdm_module.tqdm = original
 
 
 def formatear_timestamp(segundos: float, separador: str = ",") -> str:
@@ -67,14 +101,16 @@ def transcribir(
     idioma: Optional[str] = None,
     traducir: bool = False,
     device: Optional[str] = None,
-    on_progress: Optional[Callable[[dict], None]] = None,
+    on_progress: Optional[Callable[[float], None]] = None,
+    evento_cancelar: Optional[Event] = None,
 ) -> dict:
     mdl = cargar_modelo(modelo, device)
-    resultado = mdl.transcribe(
-        str(audio),
-        language=idioma,
-        task="translate" if traducir else "transcribe",
-        verbose=False,
-        fp16=False if device == "cpu" else None,
-    )
+    with _tqdm_redirect(on_progress=on_progress, evento_cancelar=evento_cancelar):
+        resultado = mdl.transcribe(
+            str(audio),
+            language=idioma,
+            task="translate" if traducir else "transcribe",
+            verbose=False,
+            fp16=False if device == "cpu" else None,
+        )
     return resultado

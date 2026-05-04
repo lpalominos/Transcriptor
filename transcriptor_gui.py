@@ -15,7 +15,7 @@ if sys.stderr is None:
 import customtkinter as ctk
 from tkinter import filedialog, messagebox
 
-from core import FORMATOS, MODELOS, guardar_resultado, transcribir
+from core import FORMATOS, MODELOS, TranscripcionCancelada, guardar_resultado, transcribir
 
 
 IDIOMAS = [
@@ -27,7 +27,10 @@ IDIOMAS = [
     ("Alemán", "de"),
     ("Italiano", "it"),
 ]
-DEVICES = [("Auto", None), ("CPU", "cpu"), ("GPU (CUDA)", "cuda")]
+import torch
+DEVICES = [("Auto", None), ("CPU", "cpu")]
+if torch.cuda.is_available():
+    DEVICES.append(("GPU (CUDA)", "cuda"))
 
 
 ctk.set_appearance_mode("system")
@@ -45,6 +48,7 @@ class App(ctk.CTk):
         self.archivo_audio: Path | None = None
         self.archivo_salida: Path | None = None
         self.trabajando = False
+        self.evento_cancelar = threading.Event()
 
         self._construir()
         self.after(120, self._procesar_cola)
@@ -125,16 +129,28 @@ class App(ctk.CTk):
             font=ctk.CTkFont(size=15, weight="bold"), command=self._iniciar
         )
         self.btn_play.grid(row=0, column=0, sticky="ew")
+        self.btn_cancelar = ctk.CTkButton(
+            marco_btn, text="■  Cancelar", width=140, height=42,
+            fg_color="#c0392b", hover_color="#922b21",
+            command=self._cancelar, state="disabled"
+        )
+        self.btn_cancelar.grid(row=0, column=1, padx=(10, 0))
         self.btn_abrir = ctk.CTkButton(
             marco_btn, text="Abrir carpeta", width=140, height=42,
             command=self._abrir_carpeta, state="disabled"
         )
-        self.btn_abrir.grid(row=0, column=1, padx=(10, 0))
+        self.btn_abrir.grid(row=0, column=2, padx=(10, 0))
 
         # Progreso
-        self.barra = ctk.CTkProgressBar(self, mode="indeterminate")
-        self.barra.grid(row=5, column=0, padx=20, pady=(0, 8), sticky="ew")
+        self.barra = ctk.CTkProgressBar(self, mode="determinate")
+        self.barra.grid(row=5, column=0, padx=20, pady=(0, 4), sticky="ew")
         self.barra.set(0)
+
+        self.var_porcentaje = ctk.StringVar(value="")
+        ctk.CTkLabel(self, textvariable=self.var_porcentaje, anchor="w",
+                      font=ctk.CTkFont(size=12)).grid(
+            row=5, column=0, padx=24, pady=(0, 0), sticky="es"
+        )
 
         # Log
         self.log = ctk.CTkTextbox(self, height=180)
@@ -198,6 +214,12 @@ class App(ctk.CTk):
         self.log.see("end")
         self.log.configure(state="disabled")
 
+    def _cancelar(self) -> None:
+        if self.trabajando:
+            self.evento_cancelar.set()
+            self.btn_cancelar.configure(state="disabled", text="Cancelando...")
+            self._logear("⏹ Cancelando transcripción...")
+
     def _iniciar(self) -> None:
         if self.trabajando:
             return
@@ -213,9 +235,12 @@ class App(ctk.CTk):
         salida = self.archivo_salida or self.archivo_audio.with_suffix(f".{formato}")
 
         self.trabajando = True
+        self.evento_cancelar.clear()
         self.btn_play.configure(state="disabled", text="Procesando...")
+        self.btn_cancelar.configure(state="normal", text="■  Cancelar")
         self.btn_abrir.configure(state="disabled")
-        self.barra.start()
+        self.barra.set(0)
+        self.var_porcentaje.set("0%")
         self.var_estado.set("Trabajando...")
         self._logear(f"→ Audio: {self.archivo_audio}")
         self._logear(f"→ Modelo: {modelo}  Idioma: {idioma or 'auto'}  Formato: {formato}")
@@ -230,14 +255,20 @@ class App(ctk.CTk):
         hilo.start()
 
     def _worker(self, audio, modelo, idioma, traducir, device, salida, formato):
+        def on_progress(fraccion):
+            self.cola.put(("progreso", fraccion))
+
         try:
             self.cola.put(("log", f"Cargando modelo '{modelo}' (puede tardar la primera vez)..."))
             resultado = transcribir(
-                audio, modelo=modelo, idioma=idioma, traducir=traducir, device=device
+                audio, modelo=modelo, idioma=idioma, traducir=traducir, device=device,
+                on_progress=on_progress, evento_cancelar=self.evento_cancelar,
             )
             self.cola.put(("log", "Guardando resultado..."))
             guardar_resultado(resultado, salida, formato)
             self.cola.put(("ok", str(salida)))
+        except TranscripcionCancelada:
+            self.cola.put(("cancelado", ""))
         except FileNotFoundError as e:
             msg = str(e)
             if "WinError 2" in msg or "ffmpeg" in msg.lower():
@@ -251,28 +282,41 @@ class App(ctk.CTk):
         except Exception:
             self.cola.put(("error", traceback.format_exc()))
 
+    def _restablecer_controles(self) -> None:
+        self.trabajando = False
+        self.btn_play.configure(state="normal", text="▶  Transcribir")
+        self.btn_cancelar.configure(state="disabled", text="■  Cancelar")
+
     def _procesar_cola(self) -> None:
         try:
             while True:
                 tipo, dato = self.cola.get_nowait()
                 if tipo == "log":
                     self._logear(dato)
+                elif tipo == "progreso":
+                    self.barra.set(dato)
+                    self.var_porcentaje.set(f"{dato:.0%}")
+                    self.var_estado.set(f"Transcribiendo... {dato:.0%}")
                 elif tipo == "ok":
                     self._logear(f"✓ Listo: {dato}")
                     self.var_estado.set(f"Completado: {dato}")
-                    self.barra.stop()
                     self.barra.set(1)
-                    self.btn_play.configure(state="normal", text="▶  Transcribir")
+                    self.var_porcentaje.set("100%")
                     self.btn_abrir.configure(state="normal")
                     self.archivo_salida = Path(dato)
-                    self.trabajando = False
+                    self._restablecer_controles()
+                elif tipo == "cancelado":
+                    self._logear("⏹ Transcripción cancelada.")
+                    self.var_estado.set("Cancelado.")
+                    self.barra.set(0)
+                    self.var_porcentaje.set("")
+                    self._restablecer_controles()
                 elif tipo == "error":
                     self._logear(f"✗ Error: {dato}")
                     self.var_estado.set("Error.")
-                    self.barra.stop()
                     self.barra.set(0)
-                    self.btn_play.configure(state="normal", text="▶  Transcribir")
-                    self.trabajando = False
+                    self.var_porcentaje.set("")
+                    self._restablecer_controles()
                     messagebox.showerror("Error", dato)
         except queue.Empty:
             pass
